@@ -1,6 +1,6 @@
 import numpy as np
 
-image_set_dir = './KITTI/ImageSets'
+image_set_dir = './CISS/ImageSets'
 trainval_file = image_set_dir+'/trainval.txt'
 train_file = image_set_dir+'/train.txt'
 val_file = image_set_dir+'/val.txt'
@@ -13,8 +13,8 @@ f.close()
 
 idx = np.random.permutation(idx)
 
-train_idx = sorted(idx[:len(idx)/2])
-val_idx = sorted(idx[len(idx)/2:])
+train_idx = sorted(idx[:len(idx)*7/10])
+val_idx = sorted(idx[len(idx)*7/10:])
 
 with open(train_file, 'w') as f:
   for i in train_idx:

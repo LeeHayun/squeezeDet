@@ -17,13 +17,13 @@ from six.moves import xrange
 import tensorflow as tf
 
 from config import *
-from dataset import pascal_voc, kitti
+from dataset import pascal_voc, ciss
 from utils.util import bbox_transform, Timer
 from nets import *
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('dataset', 'KITTI',
+tf.app.flags.DEFINE_string('dataset', 'CISS',
                            """Currently support PASCAL_VOC or KITTI dataset.""")
 tf.app.flags.DEFINE_string('data_path', '', """Root directory of data""")
 tf.app.flags.DEFINE_string('image_set', 'test',
@@ -32,9 +32,9 @@ tf.app.flags.DEFINE_string('image_set', 'test',
 tf.app.flags.DEFINE_string('year', '2007',
                             """VOC challenge year. 2007 or 2012"""
                             """Only used for VOC data""")
-tf.app.flags.DEFINE_string('eval_dir', '/tmp/bichen/logs/squeezeDet/eval',
+tf.app.flags.DEFINE_string('eval_dir', '/tmp/hayun/logs/squeezeDet/eval',
                             """Directory where to write event logs """)
-tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/bichen/logs/squeezeDet/train',
+tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/hayun/logs/squeezeDet/train',
                             """Path to the training checkpoint.""")
 tf.app.flags.DEFINE_integer('eval_interval_secs', 60 * 1,
                              """How often to check if new cpt is saved.""")
@@ -72,8 +72,8 @@ def eval_once(
       _t['im_read'].toc()
 
       _t['im_detect'].tic()
-      det_boxes, det_probs, det_class = sess.run(
-          [model.det_boxes, model.det_probs, model.det_class],
+      det_boxes, det_probs, det_class, det_depths = sess.run(
+          [model.det_boxes, model.det_probs, model.det_class, model.det_depths],
           feed_dict={model.image_input:images})
       _t['im_detect'].toc()
 
@@ -83,12 +83,12 @@ def eval_once(
         det_boxes[j, :, 0::2] /= scales[j][0]
         det_boxes[j, :, 1::2] /= scales[j][1]
 
-        det_bbox, score, det_class = model.filter_prediction(
-            det_boxes[j], det_probs[j], det_class[j])
+        det_bbox, score, det_class0, det_depth = model.filter_prediction(
+            det_boxes[j], det_probs[j], det_class[j], det_depths[j])
 
         num_detection += len(det_bbox)
-        for c, b, s in zip(det_class, det_bbox, score):
-          all_boxes[c][i].append(bbox_transform(b) + [s])
+        for c, b, s, d in zip(det_class0, det_bbox, score, det_depth):
+          all_boxes[c][i].append(bbox_transform(b) + [s] + [d[0]])
       _t['misc'].toc()
 
       print ('im_detect: {:d}/{:d} im_read: {:.3f}s '
@@ -135,7 +135,7 @@ def eval_once(
 
 def evaluate():
   """Evaluate."""
-  assert FLAGS.dataset == 'KITTI', \
+  assert FLAGS.dataset == 'CISS', \
       'Currently only supports KITTI dataset'
 
   os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu
@@ -146,27 +146,27 @@ def evaluate():
         or FLAGS.net == 'squeezeDet' or FLAGS.net == 'squeezeDet+', \
         'Selected neural net architecture not supported: {}'.format(FLAGS.net)
     if FLAGS.net == 'vgg16':
-      mc = kitti_vgg16_config()
+      mc = ciss_vgg16_config()
       mc.BATCH_SIZE = 1 # TODO(bichen): allow batch size > 1
       mc.LOAD_PRETRAINED_MODEL = False
       model = VGG16ConvDet(mc)
     elif FLAGS.net == 'resnet50':
-      mc = kitti_res50_config()
+      mc = ciss_res50_config()
       mc.BATCH_SIZE = 1 # TODO(bichen): allow batch size > 1
       mc.LOAD_PRETRAINED_MODEL = False
       model = ResNet50ConvDet(mc)
     elif FLAGS.net == 'squeezeDet':
-      mc = kitti_squeezeDet_config()
+      mc = ciss_squeezeDet_config()
       mc.BATCH_SIZE = 1 # TODO(bichen): allow batch size > 1
       mc.LOAD_PRETRAINED_MODEL = False
       model = SqueezeDet(mc)
     elif FLAGS.net == 'squeezeDet+':
-      mc = kitti_squeezeDetPlus_config()
+      mc = ciss_squeezeDetPlus_config()
       mc.BATCH_SIZE = 1 # TODO(bichen): allow batch size > 1
       mc.LOAD_PRETRAINED_MODEL = False
       model = SqueezeDetPlus(mc)
 
-    imdb = kitti(FLAGS.image_set, FLAGS.data_path, mc)
+    imdb = ciss(FLAGS.image_set, FLAGS.data_path, mc)
 
     # add summary ops and placeholders
     ap_names = []

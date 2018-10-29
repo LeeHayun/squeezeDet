@@ -6,9 +6,9 @@ import numpy as np
 
 from config import base_model_config
 
-def kitti_model_config():
+def ciss_model_config():
   """Specify the parameters to tune below."""
-  mc                       = base_model_config('KITTI')
+  mc                       = base_model_config('CISS')
   # mc.IMAGE_WIDTH           = 1864 # half width 621
   # mc.IMAGE_HEIGHT          = 562 # half height 187
   mc.IMAGE_WIDTH           = 1248 # half width 621
@@ -30,6 +30,7 @@ def kitti_model_config():
   mc.LOSS_COEF_CONF_POS    = 75.0
   mc.LOSS_COEF_CONF_NEG    = 100.0
   mc.LOSS_COEF_CLASS       = 1.0
+  mc.LOSS_COEF_DEPTH       = 10.0
   mc.MAX_GRAD_NORM         = 1.0
   mc.DATA_AUGMENTATION     = True
   mc.DRIFT_X               = 150

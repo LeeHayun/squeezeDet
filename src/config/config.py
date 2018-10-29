@@ -8,7 +8,7 @@ import numpy as np
 from easydict import EasyDict as edict
 
 def base_model_config(dataset='PASCAL_VOC'):
-  assert dataset.upper()=='PASCAL_VOC' or dataset.upper()=='KITTI', \
+  assert dataset.upper()=='PASCAL_VOC' or dataset.upper()=='KITTI' or dataset.upper()=='CISS', \
       'Currently only support PASCAL_VOC or KITTI dataset'
 
   cfg = edict()
@@ -22,7 +22,7 @@ def base_model_config(dataset='PASCAL_VOC'):
                        'car', 'cat', 'chair', 'cow', 'diningtable', 'dog',
                        'horse', 'motorbike', 'person', 'pottedplant', 'sheep',
                        'sofa', 'train', 'tvmonitor')
-  elif cfg.DATASET == 'KITTI':
+  elif cfg.DATASET == 'KITTI' or cfg.DATASET == 'CISS':
     cfg.CLASS_NAMES = ('car', 'pedestrian', 'cyclist')
 
   # number of categories to classify

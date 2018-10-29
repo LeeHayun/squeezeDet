@@ -6,9 +6,9 @@ import numpy as np
 
 from config import base_model_config
 
-def kitti_squeezeDet_config():
+def ciss_squeezeDet_config():
   """Specify the parameters to tune below."""
-  mc                       = base_model_config('KITTI')
+  mc                       = base_model_config('CISS')
 
   mc.IMAGE_WIDTH           = 1248
   mc.IMAGE_HEIGHT          = 384
@@ -25,8 +25,9 @@ def kitti_squeezeDet_config():
   mc.LOSS_COEF_CONF_POS    = 75.0
   mc.LOSS_COEF_CONF_NEG    = 100.0
   mc.LOSS_COEF_CLASS       = 1.0
+  mc.LOSS_COEF_DEPTH       = 0.001
 
-  mc.PLOT_PROB_THRESH      = 0.4
+  mc.PLOT_PROB_THRESH      = 0.6
   mc.NMS_THRESH            = 0.4
   mc.PROB_THRESH           = 0.005
   mc.TOP_N_DETECTION       = 64

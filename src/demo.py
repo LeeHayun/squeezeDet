@@ -61,7 +61,7 @@ def video_demo():
   with tf.Graph().as_default():
     # Load model
     if FLAGS.demo_net == 'squeezeDet':
-      mc = kitti_squeezeDet_config()
+      mc = ciss_squeezeDet_config()
       mc.BATCH_SIZE = 1
       # model parameters will be restored from checkpoint
       mc.LOAD_PRETRAINED_MODEL = False
@@ -167,7 +167,7 @@ def image_demo():
   with tf.Graph().as_default():
     # Load model
     if FLAGS.demo_net == 'squeezeDet':
-      mc = kitti_squeezeDet_config()
+      mc = ciss_squeezeDet_config()
       mc.BATCH_SIZE = 1
       # model parameters will be restored from checkpoint
       mc.LOAD_PRETRAINED_MODEL = False
@@ -183,39 +183,61 @@ def image_demo():
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
       saver.restore(sess, FLAGS.checkpoint)
 
-      for f in glob.iglob(FLAGS.input_path):
+      #for f in glob.iglob(FLAGS.input_path):
+      filename_list = glob.glob(FLAGS.input_path)
+      print(FLAGS.input_path)
+      print(filename_list)
+      print(len(filename_list))
+      for i in range(len(filename_list)):
+        f = filename_list[i]
         im = cv2.imread(f)
         im = im.astype(np.float32, copy=False)
         im = cv2.resize(im, (mc.IMAGE_WIDTH, mc.IMAGE_HEIGHT))
         input_image = im - mc.BGR_MEANS
 
         # Detect
-        det_boxes, det_probs, det_class = sess.run(
-            [model.det_boxes, model.det_probs, model.det_class],
+        det_boxes, det_probs, det_class, det_depths = sess.run(
+            [model.det_boxes, model.det_probs, model.det_class, model.det_depths],
             feed_dict={model.image_input:[input_image]})
 
         # Filter
-        final_boxes, final_probs, final_class = model.filter_prediction(
-            det_boxes[0], det_probs[0], det_class[0])
+        final_boxes, final_probs, final_class, final_depths = model.filter_prediction(
+            det_boxes[0], det_probs[0], det_class[0], det_depths[0])
 
         keep_idx    = [idx for idx in range(len(final_probs)) \
                           if final_probs[idx] > mc.PLOT_PROB_THRESH]
         final_boxes = [final_boxes[idx] for idx in keep_idx]
         final_probs = [final_probs[idx] for idx in keep_idx]
         final_class = [final_class[idx] for idx in keep_idx]
+        final_depths = [final_depths[idx] for idx in keep_idx]
 
         # TODO(bichen): move this color dict to configuration file
+        """
         cls2clr = {
             'car': (255, 191, 0),
             'cyclist': (0, 191, 255),
             'pedestrian':(255, 0, 191)
         }
+        """
+        cls2clr = {
+            'car': (0, 255, 0),
+            'cyclist': (0, 191, 255),
+            'pedestrian':(255, 0, 191)
+        }
 
         # Draw boxes
+        """
         _draw_box(
             im, final_boxes,
-            [mc.CLASS_NAMES[idx]+': (%.2f)'% prob \
-                for idx, prob in zip(final_class, final_probs)],
+            [mc.CLASS_NAMES[idx]+': (%.2f)'% prob+',%.2fm'% depth \
+                for idx, prob, depth in zip(final_class, final_probs, final_depths)],
+            cdict=cls2clr,
+        )
+        """
+        _draw_box(
+            im, final_boxes,
+            [mc.CLASS_NAMES[idx]+': %.2fm'% depth \
+                for idx, prob, depth in zip(final_class, final_probs, final_depths)],
             cdict=cls2clr,
         )
 

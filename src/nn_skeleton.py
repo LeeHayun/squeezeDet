@@ -95,6 +95,11 @@ class ModelSkeleton:
     # Tensor used to represent labels
     self.ph_labels = tf.placeholder(
         tf.float32, [mc.BATCH_SIZE, mc.ANCHORS, mc.CLASSES], name='labels')
+    # Tensor used to represent depths
+    self.ph_depth_input = tf.placeholder(
+        tf.float32, [mc.BATCH_SIZE, mc.ANCHORS, 1], name='depth_input')
+    self.ph_depth_mask = tf.placeholder(
+        tf.float32, [mc.BATCH_SIZE, mc.ANCHORS, 1], name='depth_mask')
 
     # IOU between predicted anchors with ground-truth boxes
     self.ious = tf.Variable(
@@ -105,21 +110,23 @@ class ModelSkeleton:
     self.FIFOQueue = tf.FIFOQueue(
         capacity=mc.QUEUE_CAPACITY,
         dtypes=[tf.float32, tf.float32, tf.float32, 
-                tf.float32, tf.float32],
+                tf.float32, tf.float32, tf.float32, tf.float32],
         shapes=[[mc.IMAGE_HEIGHT, mc.IMAGE_WIDTH, 3],
                 [mc.ANCHORS, 1],
                 [mc.ANCHORS, 4],
                 [mc.ANCHORS, 4],
-                [mc.ANCHORS, mc.CLASSES]],
+                [mc.ANCHORS, mc.CLASSES],
+                [mc.ANCHORS, 1],
+                [mc.ANCHORS, 1]],
     )
 
     self.enqueue_op = self.FIFOQueue.enqueue_many(
         [self.ph_image_input, self.ph_input_mask,
-         self.ph_box_delta_input, self.ph_box_input, self.ph_labels]
+         self.ph_box_delta_input, self.ph_box_input, self.ph_labels, self.ph_depth_input, self.ph_depth_mask]
     )
 
     self.image_input, self.input_mask, self.box_delta_input, \
-        self.box_input, self.labels = tf.train.batch(
+        self.box_input, self.labels, self.depth_input, self.depth_mask = tf.train.batch(
             self.FIFOQueue.dequeue(), batch_size=mc.BATCH_SIZE,
             capacity=mc.QUEUE_CAPACITY) 
 
@@ -170,10 +177,18 @@ class ModelSkeleton:
       )
 
       # bbox_delta
+      num_box_delta = mc.ANCHOR_PER_GRID*4+num_confidence_scores
       self.pred_box_delta = tf.reshape(
-          preds[:, :, :, num_confidence_scores:],
+          preds[:, :, :, num_confidence_scores:num_box_delta],
           [mc.BATCH_SIZE, mc.ANCHORS, 4],
           name='bbox_delta'
+      )
+
+      # depth
+      self.pred_depth = tf.reshape(
+          preds[:, :, :, num_box_delta:],
+          [mc.BATCH_SIZE, mc.ANCHORS, 1],
+          name='pred_depth'
       )
 
       # number of object. Used to normalize bbox and classification loss
@@ -282,6 +297,11 @@ class ModelSkeleton:
       self.det_probs = tf.reduce_max(probs, 2, name='score')
       self.det_class = tf.argmax(probs, 2, name='class_idx')
 
+    with tf.variable_scope('depth') as scope:
+      self._activation_summary(self.pred_depth, 'depth')
+
+      self.det_depths = self.pred_depth
+
   def _add_loss_graph(self):
     """Define the loss operation."""
     mc = self.mc
@@ -322,6 +342,17 @@ class ModelSkeleton:
           name='bbox_loss'
       )
       tf.add_to_collection('losses', self.bbox_loss)
+
+    with tf.variable_scope('depth_regression') as scope:
+      self.depth_loss = tf.truediv(
+          tf.reduce_sum(
+              mc.LOSS_COEF_DEPTH * tf.square(
+                  self.depth_mask*(self.depth_input - self.pred_depth))),
+          self.num_objects,
+          name='depth_loss'
+      )
+      tf.add_to_collection('losses', self.depth_loss)
+          
 
     # add above losses as well as weight decay losses to form the total loss
     self.loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
@@ -693,7 +724,7 @@ class ModelSkeleton:
 
       return outputs
 
-  def filter_prediction(self, boxes, probs, cls_idx):
+  def filter_prediction(self, boxes, probs, cls_idx, depths):
     """Filter bounding box predictions with probability threshold and
     non-maximum supression.
 
@@ -713,15 +744,18 @@ class ModelSkeleton:
       probs = probs[order]
       boxes = boxes[order]
       cls_idx = cls_idx[order]
+      depths = depths[order]
     else:
       filtered_idx = np.nonzero(probs>mc.PROB_THRESH)[0]
       probs = probs[filtered_idx]
       boxes = boxes[filtered_idx]
       cls_idx = cls_idx[filtered_idx]
+      depths = depths[filtered_idx]
 
     final_boxes = []
     final_probs = []
     final_cls_idx = []
+    final_depths = []
 
     for c in range(mc.CLASSES):
       idx_per_class = [i for i in range(len(probs)) if cls_idx[i] == c]
@@ -731,7 +765,8 @@ class ModelSkeleton:
           final_boxes.append(boxes[idx_per_class[i]])
           final_probs.append(probs[idx_per_class[i]])
           final_cls_idx.append(c)
-    return final_boxes, final_probs, final_cls_idx
+          final_depths.append(depths[idx_per_class[i]])
+    return final_boxes, final_probs, final_cls_idx, final_depths
 
   def _activation_summary(self, x, layer_name):
     """Helper to create summaries for activations.

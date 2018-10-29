@@ -2,7 +2,7 @@
 
 export GPUID=0
 export NET="squeezeDet"
-export TRAIN_DIR="/tmp/bichen/logs/SqueezeDet/"
+export TRAIN_DIR="/tmp/hayun/logs/SqueezeDet/"
 
 if [ $# -eq 0 ]
 then
@@ -70,9 +70,9 @@ esac
 
 
 python ./src/train.py \
-  --dataset=KITTI \
+  --dataset=CISS \
   --pretrained_model_path=$PRETRAINED_MODEL_PATH \
-  --data_path=./data/KITTI \
+  --data_path=./data/CISS \
   --image_set=train \
   --train_dir="$TRAIN_DIR/train" \
   --net=$NET \

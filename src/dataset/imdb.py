@@ -128,6 +128,7 @@ class imdb(object):
 
     image_per_batch = []
     label_per_batch = []
+    depth_per_batch = []
     bbox_per_batch  = []
     delta_per_batch = []
     aidx_per_batch  = []
@@ -146,6 +147,7 @@ class imdb(object):
 
       # load annotations
       label_per_batch.append([b[4] for b in self._rois[idx][:]])
+      depth_per_batch.append([b[5] for b in self._rois[idx][:]])
       gt_bbox = np.array([[b[0], b[1], b[2], b[3]] for b in self._rois[idx][:]])
 
       if mc.DATA_AUGMENTATION:
@@ -246,7 +248,7 @@ class imdb(object):
       print ('number of objects with 0 iou: {}'.format(num_zero_iou_obj))
 
     return image_per_batch, label_per_batch, delta_per_batch, \
-        aidx_per_batch, bbox_per_batch
+        aidx_per_batch, bbox_per_batch, depth_per_batch
 
   def evaluate_detections(self):
     raise NotImplementedError

@@ -18,21 +18,21 @@ import tensorflow as tf
 import threading
 
 from config import *
-from dataset import pascal_voc, kitti
+from dataset import pascal_voc, ciss
 from utils.util import sparse_to_dense, bgr_to_rgb, bbox_transform
 from nets import *
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('dataset', 'KITTI',
-                           """Currently only support KITTI dataset.""")
+tf.app.flags.DEFINE_string('dataset', 'CISS',
+                           """Currently only support CISS dataset.""")
 tf.app.flags.DEFINE_string('data_path', '', """Root directory of data""")
 tf.app.flags.DEFINE_string('image_set', 'train',
                            """ Can be train, trainval, val, or test""")
 tf.app.flags.DEFINE_string('year', '2007',
                             """VOC challenge year. 2007 or 2012"""
                             """Only used for Pascal VOC dataset""")
-tf.app.flags.DEFINE_string('train_dir', '/tmp/bichen/logs/squeezeDet/train',
+tf.app.flags.DEFINE_string('train_dir', '/tmp/hayun/logs/squeezeDet/train',
                             """Directory where to write event logs """
                             """and checkpoint.""")
 tf.app.flags.DEFINE_integer('max_steps', 1000000,
@@ -65,44 +65,49 @@ def _draw_box(im, box_list, label_list, color=(0,255,0), cdict=None, form='cente
     else:
       c = color
 
+    my_label = label.split(':')[1]
+
     # draw box
     cv2.rectangle(im, (xmin, ymin), (xmax, ymax), c, 1)
     # draw label
     font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(im, label, (xmin, ymax), font, 0.3, c, 1)
+    #cv2.putText(im, label, (xmin, ymax), font, 0.3, c, 1)
+    cv2.putText(im, my_label, (xmin-15, ymax+25), font, 1, c, 2)
 
-def _viz_prediction_result(model, images, bboxes, labels, batch_det_bbox,
-                           batch_det_class, batch_det_prob):
+def _viz_prediction_result(model, images, bboxes, labels, depths, batch_det_bbox,
+                           batch_det_class, batch_det_prob, batch_det_depth):
   mc = model.mc
 
   for i in range(len(images)):
     # draw ground truth
     _draw_box(
         images[i], bboxes[i],
-        [mc.CLASS_NAMES[idx] for idx in labels[i]],
+        [mc.CLASS_NAMES[idx]+': (%.2fm)'% depth for idx, depth in zip(labels[i], depths[i])],
         (0, 255, 0))
 
     # draw prediction
-    det_bbox, det_prob, det_class = model.filter_prediction(
-        batch_det_bbox[i], batch_det_prob[i], batch_det_class[i])
+    det_bbox, det_prob, det_class, det_depth = model.filter_prediction(
+        batch_det_bbox[i], batch_det_prob[i], batch_det_class[i], batch_det_depth[i])
 
+    print(det_prob)
     keep_idx    = [idx for idx in range(len(det_prob)) \
                       if det_prob[idx] > mc.PLOT_PROB_THRESH]
     det_bbox    = [det_bbox[idx] for idx in keep_idx]
     det_prob    = [det_prob[idx] for idx in keep_idx]
     det_class   = [det_class[idx] for idx in keep_idx]
+    det_depth   = [det_depth[idx] for idx in keep_idx]
 
     _draw_box(
         images[i], det_bbox,
-        [mc.CLASS_NAMES[idx]+': (%.2f)'% prob \
-            for idx, prob in zip(det_class, det_prob)],
+        [mc.CLASS_NAMES[idx]+': (%.2f, %.2fm)'% (prob, depth) \
+            for idx, prob, depth in zip(det_class, det_prob, det_depth)],
         (0, 0, 255))
 
 
 def train():
   """Train SqueezeDet model"""
-  assert FLAGS.dataset == 'KITTI', \
-      'Currently only support KITTI dataset'
+  assert FLAGS.dataset == 'CISS', \
+      'Currently only support CISS dataset'
 
   os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu
 
@@ -122,7 +127,7 @@ def train():
       mc.PRETRAINED_MODEL_PATH = FLAGS.pretrained_model_path
       model = ResNet50ConvDet(mc)
     elif FLAGS.net == 'squeezeDet':
-      mc = kitti_squeezeDet_config()
+      mc = ciss_squeezeDet_config()
       mc.IS_TRAINING = True
       mc.PRETRAINED_MODEL_PATH = FLAGS.pretrained_model_path
       model = SqueezeDet(mc)
@@ -132,7 +137,7 @@ def train():
       mc.PRETRAINED_MODEL_PATH = FLAGS.pretrained_model_path
       model = SqueezeDetPlus(mc)
 
-    imdb = kitti(FLAGS.image_set, FLAGS.data_path, mc)
+    imdb = ciss(FLAGS.image_set, FLAGS.data_path, mc)
 
     # save model size, flops, activations by layers
     with open(os.path.join(FLAGS.train_dir, 'model_metrics.txt'), 'w') as f:
@@ -163,10 +168,10 @@ def train():
     def _load_data(load_to_placeholder=True):
       # read batch input
       image_per_batch, label_per_batch, box_delta_per_batch, aidx_per_batch, \
-          bbox_per_batch = imdb.read_batch()
+          bbox_per_batch, depth_per_batch = imdb.read_batch()
 
-      label_indices, bbox_indices, box_delta_values, mask_indices, box_values, \
-          = [], [], [], [], []
+      label_indices, bbox_indices, box_delta_values, mask_indices, box_values, depth_values, depth_indices, \
+          = [], [], [], [], [], [], []
       aidx_set = set()
       num_discarded_labels = 0
       num_labels = 0
@@ -182,6 +187,9 @@ def train():
                 [[i, aidx_per_batch[i][j], k] for k in range(4)])
             box_delta_values.extend(box_delta_per_batch[i][j])
             box_values.extend(bbox_per_batch[i][j])
+            depth_values.append(depth_per_batch[i][j])
+            if depth_per_batch[i][j] != -1:
+              depth_indices.append([i, aidx_per_batch[i][j]])
           else:
             num_discarded_labels += 1
 
@@ -195,12 +203,16 @@ def train():
         box_delta_input = model.ph_box_delta_input
         box_input = model.ph_box_input
         labels = model.ph_labels
+        depth_input = model.ph_depth_input
+        depth_mask = model.ph_depth_mask
       else:
         image_input = model.image_input
         input_mask = model.input_mask
         box_delta_input = model.box_delta_input
         box_input = model.box_input
         labels = model.labels
+        depth_input = model.depth_input
+        depth_mask = model.depth_mask
 
       feed_dict = {
           image_input: image_per_batch,
@@ -219,14 +231,23 @@ def train():
               label_indices,
               [mc.BATCH_SIZE, mc.ANCHORS, mc.CLASSES],
               [1.0]*len(label_indices)),
+          depth_input: sparse_to_dense(
+              mask_indices,
+              [mc.BATCH_SIZE, mc.ANCHORS, 1],
+              depth_values),
+          depth_mask: np.reshape(
+              sparse_to_dense(
+                  depth_indices, [mc.BATCH_SIZE, mc.ANCHORS],
+                  [1.0]*len(depth_indices)),
+              [mc.BATCH_SIZE, mc.ANCHORS,  1]),
       }
 
-      return feed_dict, image_per_batch, label_per_batch, bbox_per_batch
+      return feed_dict, image_per_batch, label_per_batch, bbox_per_batch, depth_per_batch
 
     def _enqueue(sess, coord):
       try:
         while not coord.should_stop():
-          feed_dict, _, _, _ = _load_data()
+          feed_dict, _, _, _, _ = _load_data()
           sess.run(model.enqueue_op, feed_dict=feed_dict)
           if mc.DEBUG_MODE:
             print ("added to the queue")
@@ -273,20 +294,20 @@ def train():
       start_time = time.time()
 
       if step % FLAGS.summary_step == 0:
-        feed_dict, image_per_batch, label_per_batch, bbox_per_batch = \
+        feed_dict, image_per_batch, label_per_batch, bbox_per_batch, depth_per_batch = \
             _load_data(load_to_placeholder=False)
         op_list = [
             model.train_op, model.loss, summary_op, model.det_boxes,
             model.det_probs, model.det_class, model.conf_loss,
-            model.bbox_loss, model.class_loss
+            model.bbox_loss, model.class_loss, model.det_depths, model.depth_loss
         ]
         _, loss_value, summary_str, det_boxes, det_probs, det_class, \
-            conf_loss, bbox_loss, class_loss = sess.run(
+            conf_loss, bbox_loss, class_loss, det_depths, depth_loss = sess.run(
                 op_list, feed_dict=feed_dict)
 
         _viz_prediction_result(
-            model, image_per_batch, bbox_per_batch, label_per_batch, det_boxes,
-            det_class, det_probs)
+            model, image_per_batch, bbox_per_batch, label_per_batch, depth_per_batch, det_boxes,
+            det_class, det_probs, det_depths)
         image_per_batch = bgr_to_rgb(image_per_batch)
         viz_summary = sess.run(
             model.viz_op, feed_dict={model.image_to_show: image_per_batch})
@@ -295,24 +316,24 @@ def train():
         summary_writer.add_summary(viz_summary, step)
         summary_writer.flush()
 
-        print ('conf_loss: {}, bbox_loss: {}, class_loss: {}'.
-            format(conf_loss, bbox_loss, class_loss))
+        print ('conf_loss: {}, bbox_loss: {}, class_loss: {}, depth_loss: {}'.
+            format(conf_loss, bbox_loss, class_loss, depth_loss))
       else:
         if mc.NUM_THREAD > 0:
-          _, loss_value, conf_loss, bbox_loss, class_loss = sess.run(
+          _, loss_value, conf_loss, bbox_loss, class_loss, depth_loss = sess.run(
               [model.train_op, model.loss, model.conf_loss, model.bbox_loss,
-               model.class_loss], options=run_options)
+               model.class_loss, model.depth_loss], options=run_options)
         else:
           feed_dict, _, _, _ = _load_data(load_to_placeholder=False)
-          _, loss_value, conf_loss, bbox_loss, class_loss = sess.run(
+          _, loss_value, conf_loss, bbox_loss, class_loss, depth_loss = sess.run(
               [model.train_op, model.loss, model.conf_loss, model.bbox_loss,
-               model.class_loss], feed_dict=feed_dict)
+               model.class_loss, model.depth_loss], feed_dict=feed_dict)
 
       duration = time.time() - start_time
 
       assert not np.isnan(loss_value), \
           'Model diverged. Total loss: {}, conf_loss: {}, bbox_loss: {}, ' \
-          'class_loss: {}'.format(loss_value, conf_loss, bbox_loss, class_loss)
+          'class_loss: {}, depth_loss: {}'.format(loss_value, conf_loss, bbox_loss, class_loss, depth_loss)
 
       if step % 10 == 0:
         num_images_per_step = mc.BATCH_SIZE
