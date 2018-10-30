@@ -130,6 +130,32 @@ class ModelSkeleton:
             self.FIFOQueue.dequeue(), batch_size=mc.BATCH_SIZE,
             capacity=mc.QUEUE_CAPACITY) 
 
+
+    ##########################################
+    # LANE   ##############
+    ##########################################
+    self.FIFOQueue_lane = tf.FIFOQueue(
+        capacity=mc.QUEUE_CAPACITY,
+        dtypes=[tf.float32, tf.float32, tf.float32, 
+                tf.float32, tf.float32, tf.float32, tf.float32],
+        shapes=[[mc.IMAGE_HEIGHT, mc.IMAGE_WIDTH, 3],
+                [mc.ANCHORS, 1],
+                [mc.ANCHORS, 4],
+                [mc.ANCHORS, 4],
+                [mc.ANCHORS, mc.CLASSES],
+                [mc.ANCHORS, 1],
+                [mc.ANCHORS, 1]],
+    )
+
+    self.enqueue_op_lane = self.FIFOQueue_lane.enqueue_many(
+        [self.ph_image_input, self.ph_lane_mask]
+    )
+
+    self.lane_image_input, self.lane_mask = tf.train.batch(
+            self.FIFOQueue_lane.dequeue(), batch_size=mc.BATCH_SIZE,
+            capacity=mc.QUEUE_CAPACITY) 
+
+
     # model parameters
     self.model_params = []
 
@@ -370,6 +396,7 @@ class ModelSkeleton:
 
     tf.summary.scalar('learning_rate', lr)
 
+    # Object + Depth
     _add_loss_summaries(self.loss)
 
     opt = tf.train.MomentumOptimizer(learning_rate=lr, momentum=mc.MOMENTUM)
@@ -390,6 +417,26 @@ class ModelSkeleton:
 
     with tf.control_dependencies([apply_gradient_op]):
       self.train_op = tf.no_op(name='train')
+
+
+    # Lane
+    _add_loss_summaries(self.loss_lane)
+
+    opt_lane = tf.train.MomentumOptimizer(learning_rate=lr, momentum=mc.MOMENTUM)
+    grads_vars_lane = opt.compute_gradients(self.loss_lane, tf.trainable_variables())
+
+    with tf.variable_scope('clip_gradient_lane') as scope:
+      for i, (grad, var) in enumerate(grads_vars_lane):
+        grads_vars_lane[i] = (tf.clip_by_norm(grad, mc.MAX_GRAD_NORM), var)
+
+    apply_gradient_op_lane = opt.apply_gradients(grads_vars_lane, global_step=self.global_step)
+
+    for grad, var in grads_vars_lane:
+      if grad is not None:
+        tf.summary.histogram(var.op.name + '/gradients_lane', grad)
+
+    with tf.control_dependencies([apply_gradient_op_lane]):
+      self.train_op = tf.no_op(name='train_lane')
 
   def _add_viz_graph(self):
     """Define the visualization operation."""
@@ -593,6 +640,124 @@ class ModelSkeleton:
 
       return out
   
+  def _deconv_layer(
+      self, layer_name, inputs, filters, size, stride, padding='SAME',
+      freeze=False, init='trunc_norm', relu=True, stddev=0.001):
+    """Deconvolutional layer operation constructor.
+    Args:
+      layer_name: layer name.
+      inputs: input tensor
+      filters: number of output filters.
+      size: kernel size. An array of size 2 or 1.
+      stride: stride. An array of size 2 or 1.
+      padding: 'SAME' or 'VALID'. See tensorflow doc for detailed description.
+      freeze: if true, then do not train the parameters in this layer.
+      init: how to initialize kernel weights. Now accept 'xavier',
+          'trunc_norm', 'bilinear'
+      relu: whether to use relu or not.
+      stddev: standard deviation used for random weight initializer.
+    Returns:
+      A convolutional layer operation.
+    """
+
+    assert len(size) == 1 or len(size) == 2, \
+        'size should be a scalar or an array of size 2.'
+    assert len(stride) == 1 or len(stride) == 2, \
+        'stride should be a scalar or an array of size 2.'
+    assert init == 'xavier' or init == 'bilinear' or init == 'trunc_norm', \
+        'initi mode not supported {}'.format(init)
+
+    if len(size) == 1:
+      size_h, size_w = size[0], size[0]
+    else:
+      size_h, size_w = size[0], size[1]
+
+    if len(stride) == 1:
+      stride_h, stride_w = stride[0], stride[0]
+    else:
+      stride_h, stride_w = stride[0], stride[1]
+
+    mc = self.mc
+    # TODO(bichen): Currently do not support pretrained parameters for deconv
+    # layer.
+
+    if mc.DEBUG_MODE:
+      print('Input tensor shape to {}: {}'.format(layer_name, inputs.get_shape()))
+
+    with tf.variable_scope(layer_name) as scope:
+      in_height = int(inputs.get_shape()[1])
+      in_width = int(inputs.get_shape()[2])
+      channels = int(inputs.get_shape()[3])
+
+      if init == 'xavier':
+          kernel_init = tf.contrib.layers.xavier_initializer_conv2d()
+          bias_init = tf.constant_initializer(0.0)
+      elif init == 'bilinear':
+        assert size_h == 1, 'Now only support size_h=1'
+        assert channels == filters, \
+            'In bilinear interporlation mode, input channel size and output' \
+            'filter size should be the same'
+        assert stride_h == 1, \
+            'In bilinear interpolation mode, stride_h should be 1'
+
+        kernel_init = np.zeros(
+            (size_h, size_w, channels, channels),
+            dtype=np.float32)
+
+        factor_w = (size_w + 1)//2
+        assert factor_w == stride_w, \
+            'In bilinear interpolation mode, stride_w == factor_w'
+
+        center_w = (factor_w - 1) if (size_w % 2 == 1) else (factor_w - 0.5)
+        og_w = np.reshape(np.arange(size_w), (size_h, -1))
+        up_kernel = (1 - np.abs(og_w - center_w)/factor_w)
+        for c in xrange(channels):
+          kernel_init[:, :, c, c] = up_kernel
+
+        bias_init = tf.constant_initializer(0.0)
+      else:
+        kernel_init = tf.truncated_normal_initializer(
+            stddev=stddev, dtype=tf.float32)
+        bias_init = tf.constant_initializer(0.0)
+
+      # Kernel layout for deconv layer: [H_f, W_f, O_c, I_c] where I_c is the
+      # input channel size. It should be the same as the channel size of the
+      # input tensor. 
+      kernel = _variable_with_weight_decay(
+          'kernels', shape=[size_h, size_w, filters, channels],
+          wd=mc.WEIGHT_DECAY, initializer=kernel_init, trainable=(not freeze))
+      biases = _variable_on_device(
+          'biases', [filters], bias_init, trainable=(not freeze))
+      self.model_params += [kernel, biases]
+
+      # TODO(bichen): fix this
+      deconv = tf.nn.conv2d_transpose(
+          inputs, kernel, 
+          [mc.BATCH_SIZE, stride_h*in_height, stride_w*in_width, filters],
+          [1, stride_h, stride_w, 1], padding=padding,
+          name='deconv')
+      deconv_bias = tf.nn.bias_add(deconv, biases, name='bias_add')
+
+      if relu:
+        out = tf.nn.relu(deconv_bias, 'relu')
+      else:
+        out = deconv_bias
+
+      self.model_size_counter.append(
+          (layer_name, (1+size_h*size_w*channels)*filters)
+      )
+      out_shape = out.get_shape().as_list()
+      num_flops = \
+        (1+2*channels*size_h*size_w)*filters*out_shape[1]*out_shape[2]
+      if relu:
+        num_flops += 2*filters*out_shape[1]*out_shape[2]
+      self.flop_counter.append((layer_name, num_flops))
+
+      self.activation_counter.append(
+          (layer_name, out_shape[1]*out_shape[2]*out_shape[3])
+      )
+
+      return out
   def _pooling_layer(
       self, layer_name, inputs, size, stride, padding='SAME'):
     """Pooling layer operation constructor.
@@ -723,6 +888,241 @@ class ModelSkeleton:
       self.activation_counter.append((layer_name, hiddens))
 
       return outputs
+
+  def _recurrent_crf_layer(
+      self, layer_name, inputs, bilateral_filters, sizes=[3, 5],
+      num_iterations=1, padding='SAME'):
+    """Recurrent conditional random field layer. Iterative meanfield inference is
+    implemented as a reccurent neural network.
+    Args:
+      layer_name: layer name
+      inputs: input tensor with shape [batch_size, zenith, azimuth, num_class].
+      bilateral_filters: filter weight with shape 
+          [batch_size, zenith, azimuth, sizes[0]*size[1]-1].
+      sizes: size of the local region to be filtered.
+      num_iterations: number of meanfield inferences.
+      padding: padding strategy
+    Returns:
+      outputs: tensor with shape [batch_size, zenith, azimuth, num_class].
+    """
+    assert num_iterations >= 1, 'number of iterations should >= 1'
+
+    mc = self.mc
+    with tf.variable_scope(layer_name) as scope:
+      # initialize compatibilty matrices
+      compat_kernel_init = tf.constant(
+          np.reshape(
+              np.ones((mc.NUM_CLASS, mc.NUM_CLASS)) - np.identity(mc.NUM_CLASS),
+              [1, 1, mc.NUM_CLASS, mc.NUM_CLASS]
+          ),
+          dtype=tf.float32
+      )
+      bi_compat_kernel = _variable_on_device(
+          name='bilateral_compatibility_matrix',
+          shape=[1, 1, mc.NUM_CLASS, mc.NUM_CLASS],
+          initializer=compat_kernel_init*mc.BI_FILTER_COEF,
+          trainable=True
+      )
+      self._activation_summary(bi_compat_kernel, 'bilateral_compat_mat')
+
+      angular_compat_kernel = _variable_on_device(
+          name='angular_compatibility_matrix',
+          shape=[1, 1, mc.NUM_CLASS, mc.NUM_CLASS],
+          initializer=compat_kernel_init*mc.ANG_FILTER_COEF,
+          trainable=True
+      )
+      self._activation_summary(angular_compat_kernel, 'angular_compat_mat')
+
+      self.model_params += [bi_compat_kernel, angular_compat_kernel]
+
+      condensing_kernel = tf.constant(
+          util.condensing_matrix(sizes[0], sizes[1], mc.NUM_CLASS),
+          dtype=tf.float32,
+          name='condensing_kernel'
+      )
+
+      angular_filters = tf.constant(
+          util.angular_filter_kernel(
+              sizes[0], sizes[1], mc.NUM_CLASS, mc.ANG_THETA_A**2),
+          dtype=tf.float32,
+          name='angular_kernel'
+      )
+
+      bi_angular_filters = tf.constant(
+          util.angular_filter_kernel(
+              sizes[0], sizes[1], mc.NUM_CLASS, mc.BILATERAL_THETA_A**2),
+          dtype=tf.float32,
+          name='bi_angular_kernel'
+      )
+
+      for it in range(num_iterations):
+        unary = tf.nn.softmax(
+            inputs, dim=-1, name='unary_term_at_iter_{}'.format(it))
+
+        ang_output, bi_output = self._locally_connected_layer(
+            'message_passing_iter_{}'.format(it), unary,
+            bilateral_filters, angular_filters, bi_angular_filters,
+            condensing_kernel, sizes=sizes,
+            padding=padding
+        )
+
+        # 1x1 convolution as compatibility transform
+        ang_output = tf.nn.conv2d(
+            ang_output, angular_compat_kernel, strides=[1, 1, 1, 1],
+            padding='SAME', name='angular_compatibility_transformation')
+        self._activation_summary(
+            ang_output, 'ang_transfer_iter_{}'.format(it))
+
+        bi_output = tf.nn.conv2d(
+            bi_output, bi_compat_kernel, strides=[1, 1, 1, 1], padding='SAME',
+            name='bilateral_compatibility_transformation')
+        self._activation_summary(
+            bi_output, 'bi_transfer_iter_{}'.format(it))
+
+        pairwise = tf.add(ang_output, bi_output,
+                          name='pairwise_term_at_iter_{}'.format(it))
+
+        outputs = tf.add(unary, pairwise,
+                         name='energy_at_iter_{}'.format(it))
+
+        inputs = outputs
+
+    return outputs
+
+  def _locally_connected_layer(
+      self, layer_name, inputs, bilateral_filters,
+      angular_filters, bi_angular_filters, condensing_kernel, sizes=[3, 5],
+      padding='SAME'):
+    """Locally connected layer with non-trainable filter parameters)
+    Args:
+      layer_name: layer name
+      inputs: input tensor with shape 
+          [batch_size, zenith, azimuth, num_class].
+      bilateral_filters: bilateral filter weight with shape 
+          [batch_size, zenith, azimuth, sizes[0]*size[1]-1].
+      angular_filters: angular filter weight with shape 
+          [sizes[0], sizes[1], in_channel, in_channel].
+      condensing_kernel: tensor with shape 
+          [size[0], size[1], num_class, (sizes[0]*size[1]-1)*num_class]
+      sizes: size of the local region to be filtered.
+      padding: padding strategy
+    Returns:
+      ang_output: output tensor filtered by anguler filter with shape 
+          [batch_size, zenith, azimuth, num_class].
+      bi_output: output tensor filtered by bilateral filter with shape 
+          [batch_size, zenith, azimuth, num_class].
+    """
+    assert padding=='SAME', 'only support SAME padding strategy'
+    assert sizes[0] % 2 == 1 and sizes[1] % 2 == 1, \
+        'Currently only support odd filter size.'
+
+    mc = self.mc
+    size_z, size_a = sizes
+    pad_z, pad_a = size_z//2, size_a//2
+    half_filter_dim = (size_z*size_a)//2
+    batch, zenith, azimuth, in_channel = inputs.shape.as_list()
+
+    with tf.variable_scope(layer_name) as scope:
+      # message passing
+      ang_output = tf.nn.conv2d(
+          inputs, angular_filters, [1, 1, 1, 1], padding=padding,
+          name='angular_filtered_term'
+      )
+
+      bi_ang_output = tf.nn.conv2d(
+          inputs, bi_angular_filters, [1, 1, 1, 1], padding=padding,
+          name='bi_angular_filtered_term'
+      )
+
+      condensed_input = tf.reshape(
+          tf.nn.conv2d(
+              inputs*self.lidar_mask, condensing_kernel, [1, 1, 1, 1], padding=padding,
+              name='condensed_prob_map'
+          ),
+          [batch, zenith, azimuth, size_z*size_a-1, in_channel]
+      )
+
+      bi_output = tf.multiply(
+          tf.reduce_sum(condensed_input*bilateral_filters, axis=3),
+          self.lidar_mask,
+          name='bilateral_filtered_term'
+      )
+      bi_output *= bi_ang_output
+
+    return ang_output, bi_output
+
+  def _bilateral_filter_layer(
+      self, layer_name, inputs, thetas=[0.9, 0.01], sizes=[3, 5], stride=1,
+      padding='SAME'):
+    """Computing pairwise energy with a bilateral filter for CRF.
+    Args:
+      layer_name: layer name
+      inputs: input tensor with shape [batch_size, zenith, azimuth, 2] where the
+          last 2 elements are intensity and range of a lidar point.
+      thetas: theta parameter for bilateral filter.
+      sizes: filter size for zenith and azimuth dimension.
+      strides: kernel strides.
+      padding: padding.
+    Returns:
+      out: bilateral filter weight output with size
+          [batch_size, zenith, azimuth, sizes[0]*sizes[1]-1, num_class]. Each
+          [b, z, a, :, cls] represents filter weights around the center position
+          for each class.
+    """
+
+    assert padding == 'SAME', 'currently only supports "SAME" padding stategy'
+    assert stride == 1, 'currently only supports striding of 1'
+    assert sizes[0] % 2 == 1 and sizes[1] % 2 == 1, \
+        'Currently only support odd filter size.'
+
+    mc = self.mc
+    theta_a, theta_r = thetas
+    size_z, size_a = sizes
+    pad_z, pad_a = size_z//2, size_a//2
+    half_filter_dim = (size_z*size_a)//2
+    batch, zenith, azimuth, in_channel = inputs.shape.as_list()
+
+    # assert in_channel == 1, 'Only support input channel == 1'
+
+    with tf.variable_scope(layer_name) as scope:
+      condensing_kernel = tf.constant(
+          util.condensing_matrix(size_z, size_a, in_channel),
+          dtype=tf.float32,
+          name='condensing_kernel'
+      )
+
+      condensed_input = tf.nn.conv2d(
+          inputs, condensing_kernel, [1, 1, stride, 1], padding=padding,
+          name='condensed_input'
+      )
+
+      # diff_intensity = tf.reshape(
+      #     inputs[:, :, :], [batch, zenith, azimuth, 1]) \
+      #     - condensed_input[:, :, :, ::in_channel]
+
+      diff_x = tf.reshape(
+          inputs[:, :, :, 0], [batch, zenith, azimuth, 1]) \
+              - condensed_input[:, :, :, 0::in_channel]
+      diff_y = tf.reshape(
+          inputs[:, :, :, 1], [batch, zenith, azimuth, 1]) \
+              - condensed_input[:, :, :, 1::in_channel]
+      diff_z = tf.reshape(
+          inputs[:, :, :, 2], [batch, zenith, azimuth, 1]) \
+              - condensed_input[:, :, :, 2::in_channel]
+
+      bi_filters = []
+      for cls in range(mc.NUM_CLASS):
+        theta_a = mc.BILATERAL_THETA_A[cls]
+        theta_r = mc.BILATERAL_THETA_R[cls]
+        bi_filter = tf.exp(-(diff_x**2+diff_y**2+diff_z**2)/2/theta_r**2)
+        bi_filters.append(bi_filter)
+      out = tf.transpose(
+          tf.stack(bi_filters),
+          [1, 2, 3, 4, 0],
+          name='bilateral_filter_weights'
+      )
+
+    return out
 
   def filter_prediction(self, boxes, probs, cls_idx, depths):
     """Filter bounding box predictions with probability threshold and
